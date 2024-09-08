@@ -1,105 +1,102 @@
 using Microsoft.AspNetCore.SignalR;
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-namespace Chat.Hubs;
+
 public class ChatHub : Hub
 {
-    // Dictionary to track group membership (groupName -> List of users in the form (connectionId, userName))
-    private static Dictionary<string, List<(string ConnectionId, string UserName)>> GroupUsers = new Dictionary<string, List<(string, string)>>();
+    private const int MaxConnectionsPerUser = 2;
+    private static readonly ConcurrentDictionary<string, List<ConnectionInfo>> UserConnections = new();
 
-    // Method to join a group
-    public async Task JoinGroup(string groupName, string userName)
+    // Override OnConnectedAsync to assign UserIdentifier based on query string
+    public override async Task OnConnectedAsync()
     {
-        await Groups.AddToGroupAsync(Context.ConnectionId, groupName);
+        // Extract userId from the query string
+        var userId = Context.GetHttpContext()?.Request.Query["userId"].ToString();
 
-        if (!GroupUsers.ContainsKey(groupName))
+        if (string.IsNullOrEmpty(userId))
         {
-            GroupUsers[groupName] = new List<(string, string)>();
+            Console.WriteLine("Connection failed: User ID is null or empty.");
+            await base.OnConnectedAsync();
+            return;
         }
 
-        if (!GroupUsers[groupName].Any(u => u.ConnectionId == Context.ConnectionId))
+        // Assign the userId to Context.UserIdentifier
+        Context.Items["UserIdentifier"] = userId;
+
+        Console.WriteLine($"User trying to connect: {userId}, Connection ID: {Context.ConnectionId}");
+
+        // Check if the user has reached the maximum allowed connections
+        if (UserConnections.TryGetValue(userId, out var connections) && connections.Count >= MaxConnectionsPerUser)
         {
-            GroupUsers[groupName].Add((Context.ConnectionId, userName));
+            Console.WriteLine($"Connection rejected: {userId} has reached the maximum allowed connections.");
+            Context.Abort();  // Prevent the connection from being established
+            return;
         }
 
-        await Clients.Group(groupName).SendAsync("ReceiveMessage", "System", $"{userName} has joined the group.");
+        var newConnection = new ConnectionInfo(Context.ConnectionId, DateTime.UtcNow);
+        ManageUserConnections(userId, newConnection);
+
+        await base.OnConnectedAsync();
     }
 
-    // Method to send a message to the group
-    public async Task SendMessageToGroup(string groupName, string userName, string message)
+    public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        await Clients.Group(groupName).SendAsync("ReceiveMessage", userName, message);
-    }
+        var userId = Context.Items["UserIdentifier"]?.ToString();
 
-    // Method to get usernames in a group
-    public Task<List<string>> GetUsernamesInGroup(string groupName)
-    {
-        if (GroupUsers.ContainsKey(groupName))
+        if (!string.IsNullOrEmpty(userId))
         {
-            var usernames = GroupUsers[groupName].Select(u => u.UserName).ToList();
-            return Task.FromResult(usernames);
-        }
-        return Task.FromResult(new List<string>());
-    }
-
-    // Method to get user count in a group
-    public Task<int> GetUserCountInGroup(string groupName)
-    {
-        if (GroupUsers.ContainsKey(groupName))
-        {
-            return Task.FromResult(GroupUsers[groupName].Count);
-        }
-        return Task.FromResult(0);
-    }
-
-    // Handle when users disconnect and remove them from groups
-    public override async Task OnDisconnectedAsync(System.Exception exception)
-    {
-        var groupsToRemoveFrom = new List<string>();
-
-        foreach (var group in GroupUsers)
-        {
-            var user = group.Value.FirstOrDefault(u => u.ConnectionId == Context.ConnectionId);
-            if (user != default)
-            {
-                group.Value.Remove(user);
-                await Clients.Group(group.Key).SendAsync("ReceiveMessage", "System", $"{user.UserName} has left the group.");
-
-                if (!group.Value.Any()) // If no more users in the group, mark for deletion
-                {
-                    groupsToRemoveFrom.Add(group.Key);
-                }
-            }
-        }
-
-        // Remove empty groups
-        foreach (var groupName in groupsToRemoveFrom)
-        {
-            GroupUsers.Remove(groupName);
+            Console.WriteLine($"User disconnected: {userId}, Connection ID: {Context.ConnectionId}");
+            RemoveUserConnection(userId, Context.ConnectionId);
         }
 
         await base.OnDisconnectedAsync(exception);
     }
 
-    // Method to leave a group
-    public async Task LeaveGroup(string groupName, string userName)
+    private void ManageUserConnections(string userId, ConnectionInfo newConnection)
     {
-        await Groups.RemoveFromGroupAsync(Context.ConnectionId, groupName);
+        UserConnections.AddOrUpdate(userId,
+            _ => new List<ConnectionInfo> { newConnection }, // If no connections exist, add the new connection
+            (_, connections) =>
+            {
+                // Add the new connection
+                connections.Add(newConnection);
+                return connections;
+            });
+    }
 
-        if (GroupUsers.ContainsKey(groupName))
+    private void RemoveUserConnection(string userId, string connectionId)
+    {
+        if (UserConnections.TryGetValue(userId, out var connections))
         {
-            var user = GroupUsers[groupName].FirstOrDefault(u => u.ConnectionId == Context.ConnectionId);
-            if (user != default)
-            {
-                GroupUsers[groupName].Remove(user);
-                await Clients.Group(groupName).SendAsync("ReceiveMessage", "System", $"{userName} has left the group.");
-            }
+            // Find the connection to remove
+            var connection = connections.FirstOrDefault(c => c.ConnectionId == connectionId);
 
-            if (!GroupUsers[groupName].Any())
+            if (connection != null)
             {
-                GroupUsers.Remove(groupName);
+                // Remove the connection
+                connections.Remove(connection);
+
+                // If no connections remain, remove the user from the dictionary
+                if (!connections.Any())
+                {
+                    UserConnections.TryRemove(userId, out _);
+                }
             }
+        }
+    }
+
+    private class ConnectionInfo
+    {
+        public string ConnectionId { get; }
+        public DateTime ConnectedAt { get; }
+
+        public ConnectionInfo(string connectionId, DateTime connectedAt)
+        {
+            ConnectionId = connectionId;
+            ConnectedAt = connectedAt;
         }
     }
 }
