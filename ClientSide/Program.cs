@@ -16,13 +16,33 @@ class Program
             .WithAutomaticReconnect()
             .Build();
 
-        // Handle server messages (Optional: handle disconnection or other messages from the server)
-        _connection.On("ForceDisconnect", async () =>
+        // Handle server messages (success or rejection)
+        _connection.On<string>("ConnectionAccepted", message =>
         {
-            Console.WriteLine("You have been disconnected by the server.");
-            await _connection.StopAsync();
+            Console.WriteLine(message); // Connected successfully
         });
 
+        _connection.On<string>("ConnectionRejected", message =>
+        {
+            Console.WriteLine(message); // Connection rejected
+            // Optionally stop the connection immediately since it's rejected
+            Task.Run(async () =>
+            {
+                await _connection.StopAsync();
+            }).Wait();
+        });
+
+        _connection.On<string>("ConnectionFailed", message =>
+        {
+            Console.WriteLine($"Connection failed: {message}");
+            // Optionally stop the connection immediately since it's failed
+            Task.Run(async () =>
+            {
+                await _connection.StopAsync();
+            }).Wait();
+        });
+
+        // Start the connection process
         await StartConnectionAsync();
 
         Console.WriteLine("Press any key to exit...");
@@ -37,7 +57,7 @@ class Program
         try
         {
             await _connection.StartAsync();
-            Console.WriteLine("Connected to the server.");
+            Console.WriteLine("Attempting to connect to the server...");
         }
         catch (Exception ex)
         {

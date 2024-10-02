@@ -10,7 +10,6 @@ public class ChatHub : Hub
     private const int MaxConnectionsPerUser = 2;
     private static readonly ConcurrentDictionary<string, List<ConnectionInfo>> UserConnections = new();
 
-    // Override OnConnectedAsync to assign UserIdentifier based on query string
     public override async Task OnConnectedAsync()
     {
         // Extract userId from the query string
@@ -18,8 +17,8 @@ public class ChatHub : Hub
 
         if (string.IsNullOrEmpty(userId))
         {
-            Console.WriteLine("Connection failed: User ID is null or empty.");
-            await base.OnConnectedAsync();
+            // Notify the client about the failure
+            await Clients.Caller.SendAsync("ConnectionFailed", "User ID is null or empty.");
             return;
         }
 
@@ -31,13 +30,19 @@ public class ChatHub : Hub
         // Check if the user has reached the maximum allowed connections
         if (UserConnections.TryGetValue(userId, out var connections) && connections.Count >= MaxConnectionsPerUser)
         {
-            Console.WriteLine($"Connection rejected: {userId} has reached the maximum allowed connections.");
-            Context.Abort();  // Prevent the connection from being established
+            // Notify the client about the rejection BEFORE aborting the connection
+            await Clients.Caller.SendAsync("ConnectionRejected", "Maximum allowed connections reached.");
+
+            // Abort the connection after sending the rejection message
+            Context.Abort();
             return;
         }
 
         var newConnection = new ConnectionInfo(Context.ConnectionId, DateTime.UtcNow);
         ManageUserConnections(userId, newConnection);
+
+        // Notify the client about successful connection
+        await Clients.Caller.SendAsync("ConnectionAccepted", $"Connected successfully with Connection ID: {Context.ConnectionId}");
 
         await base.OnConnectedAsync();
     }
